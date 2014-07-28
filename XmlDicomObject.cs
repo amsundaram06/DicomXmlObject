@@ -1,8 +1,10 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Security;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Xml;
 using ClearCanvas.Common;
 
@@ -181,7 +183,7 @@ namespace ClearCanvas.Dicom.Utilities
             document.Save(outputStream);
         }
 
-        private String makeElementNameFromHexadecimalGroupElementValues(DicomTag dicomTag)
+        private string makeElementNameFromHexadecimalGroupElementValues(DicomTag dicomTag)
         {
             var str = new StringBuilder();
             str.Append("HEX"); // XML element names not allowed to start with a number
@@ -243,8 +245,9 @@ namespace ClearCanvas.Dicom.Utilities
                                     while (childNode != null)
                                     {
                                         var childNodeName = childNode.Name;
-                                        if (!string.IsNullOrWhiteSpace(childNodeName) && childNodeName == "value")
-                                            attributeProvider[dicomTag].AppendString(childNode.InnerText.Trim());
+                                        // Cleanup the common XML character replacements
+                                        if (!string.IsNullOrWhiteSpace(childNodeName) && childNodeName == "value")                                            
+                                            attributeProvider[dicomTag].AppendString(XmlUnescapeString(childNode.InnerText));
                                         // else may be a #text element in between
                                         childNode = childNode.NextSibling;
                                     }
@@ -324,7 +327,7 @@ namespace ClearCanvas.Dicom.Utilities
         {
             if (attribute.Values == null) return;
             var values = attribute.Values as string[];
-            if (values != null) addValuesXmlNode(values, document, node);
+            if (values != null) addValuesXmlNode(values, document, node, true);
             var ushortValues = attribute.Values as ushort[];
             if (ushortValues != null) addValuesXmlNode(ushortValues, document, node);
             var uintValues = attribute.Values as uint[];
@@ -334,20 +337,51 @@ namespace ClearCanvas.Dicom.Utilities
             if (byteValues != null) addValuesXmlNode(byteValues, document, node);
         }
 
-        private static void addValuesXmlNode<T>(IList<T> values, XmlDocument document, XmlNode node)
+        private static void addValuesXmlNode<T>(IList<T> values, XmlDocument document, XmlNode node, bool checkControlCharacters = false)
         {
             for (var j = 0; j < values.Count; ++j)
-                addValuexmlNode(document, values[j].ToString(), (j + 1).ToString(CultureInfo.InvariantCulture), node);
+                addValuexmlNode(document, values[j].ToString(), (j + 1).ToString(CultureInfo.InvariantCulture), node, checkControlCharacters);
         }
 
-        private static void addValuexmlNode(XmlDocument document, string value, string index, XmlNode node)
+        private static void addValuexmlNode(XmlDocument document, string value, string index, XmlNode node, bool checkControlCharacters)
         {
             var valueNode = document.CreateElement("value");
             var numberAttr = document.CreateAttribute("number");
             numberAttr.Value = index;
             valueNode.Attributes.SetNamedItem(numberAttr);
-            valueNode.AppendChild(document.CreateTextNode(value));
+            valueNode.AppendChild(document.CreateTextNode(checkControlCharacters ? XmlEscapeString(value) : value));
             node.AppendChild(valueNode);
+        }
+
+        private static string XmlEscapeString(string input)
+        {
+            string result = input ?? string.Empty;
+
+            result = SecurityElement.Escape(result);
+
+            // Do the regular expression to escape out other invalid XML characters in the string not caught by the above.
+            // NOTE: the \x sequences you see below are C# escapes, not Regex escapes
+            result = Regex.Replace(result, "[^\x9\xA\xD\x20-\xFFFD]", m => string.Format("&#x{0:X};", (int)m.Value[0]));
+
+            return result;
+        }
+
+        private static string XmlUnescapeString(string input)
+        {
+            string result = input ?? string.Empty;
+
+            // unescape any value-encoded XML entities
+            result = Regex.Replace(result, "&#[Xx]([0-9A-Fa-f]+);", m => ((char)int.Parse(m.Groups[1].Value, NumberStyles.AllowHexSpecifier)).ToString());
+            result = Regex.Replace(result, "&#([0-9]+);", m => ((char)int.Parse(m.Groups[1].Value)).ToString());
+
+            // unescape any entities encoded by SecurityElement.Escape (only <>'"&)
+            result = result.Replace("&lt;", "<").
+                Replace("&gt;", ">").
+                Replace("&quot;", "\"").
+                Replace("&apos;", "'").
+                Replace("&amp;", "&");
+
+            return result;
         }
     }
 }
